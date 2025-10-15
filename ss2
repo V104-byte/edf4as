@@ -1,0 +1,461 @@
+repeat task.wait() until game:IsLoaded();
+
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+local Debris = game:GetService("Debris")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local Stats = game:GetService("Stats")
+local LocalPlayer = Players.LocalPlayer
+local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+local Humanoid = Character:WaitForChild("Humanoid")
+local Alive = Workspace:FindFirstChild("Alive")
+local Aerodynamic = false
+local Aerodynamic_Time = tick()
+local Last_Input = UserInputService:GetLastInputType()
+local Vector2_Mouse_Location = nil
+local Grab_Parry = nil
+local Parry_Key = nil
+local VirtualInputManager = game:GetService("VirtualInputManager")
+
+local Remotes = {}
+local Parries = 0
+local disableParryUntil = 0
+local abilityLastUsed = 0
+local Connections_Manager = {}
+local Animation = {storage = {}, current = nil, track = nil}
+local Parried = false
+local Closest_Entity = nil
+local spectate_Enabled = false
+local manualSpamSpeed = 10
+local pingBased = true
+local TargetSelectionMethod = ""
+local proxyParryFunction
+local uis = game:GetService("UserInputService")
+local rs = game:GetService("ReplicatedStorage")
+local camera = workspace.CurrentCamera
+
+
+-- Cache services once
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer.PlayerGui
+local UIS = game:GetService("UserInputService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local Camera = workspace.CurrentCamera
+
+local ParryAuthorizationToken
+local proxyParryFunction
+local Remotes = {}
+local Parry_Key
+
+
+
+
+
+
+
+
+
+-- Caminho da pasta Collection
+local swordAPI = ReplicatedStorage:WaitForChild("Shared"):WaitForChild("SwordAPI")
+local originalCollection = swordAPI:FindFirstChild("Collection")
+
+-- Guardar cópia segura da pasta Collection original
+local storedCollection
+if originalCollection then
+	storedCollection = originalCollection:Clone()
+end
+
+local function updateCollection()
+	if toggleSpam then
+		-- 🔴 Spam ligado → remover pasta Collection
+		if swordAPI:FindFirstChild("Collection") then
+			swordAPI.Collection:Destroy()
+			print("[SwordAPI] Collection removida (spam ON)")
+		end
+	else
+		-- 🟢 Spam desligado → recolocar pasta Collection se não existir
+		if not swordAPI:FindFirstChild("Collection") and storedCollection then
+			local clone = storedCollection:Clone()
+			clone.Parent = swordAPI
+			print("[SwordAPI] Collection restaurada (spam OFF)")
+		end
+	end
+end
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+-- Extract ParryAuthorizationToken by scanning Hotbar.Block.Activated connections
+for _, connection in pairs(getconnections(PlayerGui.Hotbar.Block.Activated)) do
+    local func = connection.Function
+    if func and not iscclosure(func) then
+        for _, upval in pairs(getupvalues(func)) do
+            if type(upval) == "function" then
+                ParryAuthorizationToken = getupvalue(getupvalue(upval, 2), 17)
+                if ParryAuthorizationToken then break end
+            end
+        end
+    end
+    if ParryAuthorizationToken then break end
+end
+
+-- Function to find and disable the parry function listening on TouchTapInWorld
+local function getParryFunc()
+    while task.wait() and not proxyParryFunction do
+        for _, connection in pairs(getconnections(UIS.TouchTapInWorld)) do
+            local func = connection.Function
+            if func and islclosure(func) then
+                local constants = getconstants(func)
+                if constants[#constants] == "Enabled" then
+                    proxyParryFunction = func
+                    connection:Disable()
+                    break
+                end
+            end
+        end
+    end
+    return getupvalue(getupvalue(proxyParryFunction, 2), 2)
+end
+
+local parryFunc = getParryFunc()
+local secondParryArg = getupvalue(parryFunc, 17)
+local parryRemotes = {}
+
+-- Collect RemoteEvents from parryFunc upvalues
+for _, upval in pairs(getupvalues(parryFunc)) do
+    if typeof(upval) == "Instance" and upval:IsA("RemoteEvent") then
+        table.insert(parryRemotes, upval)
+    end
+end
+
+-- Constants to ignore when searching for parry strings
+local ignoredConstants = {
+    xpcall = true,
+    Parent = true,
+    CFrame = true,
+    lookAt = true,
+    Origin = true,
+    Length = true,
+}
+
+local parryStrings = {}
+
+-- Extract 6-letter strings from parryFunc constants, excluding ignored ones, limit 3
+for _, constant in pairs(getconstants(parryFunc)) do
+    if type(constant) == "string" and #constant == 6 and not ignoredConstants[constant] and #parryStrings < 3 then
+        table.insert(parryStrings, constant)
+    end
+end
+
+-- Validate critical data
+if not secondParryArg or #secondParryArg ~= 6 then
+    warn("Invalid secondParryArg")
+    return
+end
+
+if #parryStrings ~= 3 then
+    warn("Failed to find exactly 3 parry strings")
+    return
+end
+
+for _, str in ipairs(parryStrings) do
+    if type(str) ~= "string" or #str ~= 6 then
+        warn("Invalid parry string detected")
+        return
+    end
+end
+
+if #parryRemotes ~= 3 then
+    warn("Expected 3 RemoteEvents, found " .. #parryRemotes)
+    return
+end
+
+for _, remote in ipairs(parryRemotes) do
+    if typeof(remote) ~= "Instance" or not remote:IsA("RemoteEvent") then
+        warn("Invalid RemoteEvent in parryRemotes")
+        return
+    end
+end
+
+-- ==== 4th check without loop ====
+
+local targetFunc = proxyParryFunction
+
+if type(targetFunc) == "function" and islclosure(targetFunc) and debug.getupvalues(targetFunc) then
+    local Protos = debug.getprotos(targetFunc)
+    local Upvalues = debug.getupvalues(targetFunc)
+    local Constants = debug.getconstants(targetFunc)
+
+    -- Adjust #Constants to 102 if patched
+    if (#Protos == 4) and (#Upvalues == 24) and (#Constants == 104) then
+        Remotes[debug.getupvalue(targetFunc, 16)] = debug.getconstant(targetFunc, 62)
+        Parry_Key = debug.getupvalue(targetFunc, 17)
+        Remotes[debug.getupvalue(targetFunc, 18)] = debug.getconstant(targetFunc, 64)
+        Remotes[debug.getupvalue(targetFunc, 19)] = debug.getconstant(targetFunc, 65)
+    else
+        warn("4th check conditions not met (Protos, Upvalues, or Constants count mismatch)")
+    end
+else
+    warn("targetFunc invalid for 4th check")
+end
+
+-- Main parry function to fire remotes safely
+local function parry()
+    for index, remote in ipairs(parryRemotes) do
+        local mousePos = UIS:GetMouseLocation()
+        local playersScreenPoints = {} -- Placeholder, adjust if needed
+
+        local success, err = pcall(function()
+            remote:FireServer(
+                parryStrings[index],
+                secondParryArg,
+                0,
+                Camera.CFrame,
+                playersScreenPoints,
+                {mousePos.X, mousePos.Y},
+                true
+            )
+        end)
+
+        if not success then
+            warn("Remote fire failed, attempting fallback input simulation: " .. tostring(err))
+            VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 0)
+            task.wait()
+            VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 0)
+        end
+    end
+end
+
+-- parry() is ready to call when needed
+
+
+
+-- Variável para controlar a velocidade do parry (vezes por segundo)
+local parrySpeed = 80 -- padrão inicial
+
+-- Criar GUI
+local manualSpamGui = Instance.new("ScreenGui")
+manualSpamGui.Name = "ManualSpamUI"
+manualSpamGui.Parent = game:GetService("CoreGui")
+manualSpamGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+manualSpamGui.ResetOnSpawn = false
+
+local Main = Instance.new("Frame")
+Main.Name = "Main"
+Main.Parent = manualSpamGui
+Main.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+Main.BorderSizePixel = 0
+Main.Position = UDim2.new(0.4, 0, 0.4, 0)
+Main.Size = UDim2.new(0.2, 0, 0.18, 0)
+Main.Active = true
+Main.Draggable = true
+
+local UICorner = Instance.new("UICorner", Main)
+UICorner.CornerRadius = UDim.new(0, 12)
+
+local title = Instance.new("TextLabel")
+title.Parent = Main
+title.Size = UDim2.new(1, 0, 0.25, 0)
+title.BackgroundTransparency = 1
+title.Text = "Manual Spam"
+title.TextColor3 = Color3.fromRGB(255, 255, 255)
+title.Font = Enum.Font.GothamBold
+title.TextScaled = true
+
+local speedLabel = Instance.new("TextLabel")
+speedLabel.Parent = Main
+speedLabel.Size = UDim2.new(0.6, 0, 0.2, 0)
+speedLabel.Position = UDim2.new(0.1, 0, 0.3, 0)
+speedLabel.BackgroundTransparency = 1
+speedLabel.Text = "(made by vox) parrys per second:"
+speedLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+speedLabel.Font = Enum.Font.Gotham
+speedLabel.TextScaled = true
+speedLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+local speedInput = Instance.new("TextBox")
+speedInput.Parent = Main
+speedInput.Size = UDim2.new(0.3, 0, 0.2, 0)
+speedInput.Position = UDim2.new(0.7, 0, 0.3, 0)
+speedInput.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+speedInput.TextColor3 = Color3.fromRGB(255, 255, 255)
+speedInput.Font = Enum.Font.Gotham
+speedInput.TextScaled = true
+speedInput.ClearTextOnFocus = false
+speedInput.Text = tostring(parrySpeed)
+speedInput.PlaceholderText = "Ex: 50"
+
+local spamButton = Instance.new("TextButton")
+spamButton.Name = "SpamButton"
+spamButton.Parent = Main
+spamButton.Size = UDim2.new(0.8, 0, 0.3, 0)
+spamButton.Position = UDim2.new(0.1, 0, 0.6, 0)
+spamButton.BackgroundColor3 = Color3.fromRGB(255, 0, 0)
+spamButton.Text = "OFF"
+spamButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+spamButton.Font = Enum.Font.GothamBold
+spamButton.TextScaled = true
+
+local UICorner2 = Instance.new("UICorner", spamButton)
+UICorner2.CornerRadius = UDim.new(0, 8)
+
+local function updateButton()
+    if toggleSpam then
+        spamButton.BackgroundColor3 = Color3.fromRGB(0, 200, 0)
+        spamButton.Text = "ON"
+    else
+        spamButton.BackgroundColor3 = Color3.fromRGB(200, 0, 0)
+        spamButton.Text = "OFF"
+    end
+end
+
+local lastParryTime = 0
+
+spamButton.MouseButton1Click:Connect(function()
+    toggleSpam = not toggleSpam
+    updateButton()
+
+
+    if toggleSpam then
+        lastParryTime = 0
+        spamConnection = RunService.Heartbeat:Connect(function(deltaTime)
+            if not toggleSpam then return end
+            lastParryTime = lastParryTime + deltaTime
+            local interval = 1 / parrySpeed
+            if lastParryTime >= interval then
+                lastParryTime = lastParryTime - interval
+               -- pcall(parry)
+                parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+parry()
+
+                end
+        end)
+    else
+        if spamConnection then
+            spamConnection:Disconnect()
+            spamConnection = nil
+        end
+    end
+end)
+
+-- Atualizar parrySpeed ao digitar no textbox (quando a pessoa apertar Enter ou perder o foco)
+local function tryUpdateSpeed()
+    local val = tonumber(speedInput.Text)
+    if val and val > 0 and val <= 10003 then -- limitar valores absurdos
+        parrySpeed = val
+        print("Parry speed set to: " .. parrySpeed .. " times per sec (vox on top)")
+    else
+        speedInput.Text = tostring(parrySpeed) -- resetar se inválido
+    end
+end
+
+speedInput.FocusLost:Connect(function(enterPressed)
+    if enterPressed then
+        tryUpdateSpeed()
+    end
+end)
+
+updateButton()
